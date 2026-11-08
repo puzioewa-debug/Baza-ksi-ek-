@@ -2,4 +2,3 @@ streamlit
 pypdf
 ebooklib
 beautifulsoup4
-google-genai
