@@ -3,105 +3,174 @@ from pypdf import PdfReader
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
-import tempfile
-import os
-import re
+from google import genai
+import json
 
-st.set_page_config(page_title="Baza Książek", page_icon="📚", layout="centered")
-st.title("📚 Twój Asystent Książkowy")
-st.caption("Wersja bezpośrednia – działa od ręki bez kluczy API")
+# Konfiguracja ściśle pod ekran telefonu (wąski układ, schowane menu boczne)
+st.set_page_config(
+    page_title="Czytnik AI",
+    page_icon="📱",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
 
-def extract_chunks_from_pdf(file):
+# Stylizacja CSS powiększająca przyciski i dopasowująca czcionki pod iPhone'a
+st.markdown("""
+    <style>
+    .stButton>button {
+        width: 100%;
+        height: 3.2em;
+        font-size: 16px !important;
+        font-weight: 600;
+        border-radius: 12px;
+        margin-bottom: 6px;
+    }
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 5rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+st.subheader("📚 Twój Mobilny Asystent Książek")
+
+# 1. Sprawdzanie klucza API
+if "GEMINI_API_KEY" not in st.secrets:
+    st.error("Brakuje klucza API! Dodaj GEMINI_API_KEY w ustawieniach Secrets w Streamlit.")
+    st.stop()
+
+client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+# 2. Inicjalizacja pamięci w sesji
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "book_text" not in st.session_state:
+    st.session_state.book_text = ""
+if "book_name" not in st.session_state:
+    st.session_state.book_name = ""
+
+# Funkcje czytające książki
+def extract_pdf(file):
     reader = PdfReader(file)
-    chunks = []
+    text = []
     for i, page in enumerate(reader.pages):
-        page_text = page.extract_text()
-        if page_text and page_text.strip():
-            chunks.append((f"Strona {i+1}", page_text))
-    return chunks
+        content = page.extract_text()
+        if content:
+            text.append(f"--- Strona {i+1} ---\n{content}")
+    return "\n".join(text)
 
-def extract_chunks_from_epub(file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".epub") as tmp:
-        tmp.write(file.getvalue())
-        tmp_path = tmp.name
-    try:
-        book = epub.read_epub(tmp_path)
-        chunks = []
-        section = 1
-        for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
-                text = soup.get_text().strip()
-                if text:
-                    for j in range(0, len(text), 2500):
-                        part = text[j:j+2500]
-                        chunks.append((f"Część {section}", part))
-                        section += 1
-        return chunks
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+def extract_epub(file):
+    book = ebooklib.epub.read_epub(file)
+    text = []
+    for item in book.get_items():
+        if item.get_type() == ebooklib.ITEM_DOCUMENT:
+            soup = BeautifulSoup(item.get_content(), 'html.parser')
+            text.append(soup.get_text())
+    return "\n".join(text)
 
-# Polskie słowa pomocnicze, które ignorujemy przy szukaniu, by trafiać w sedno
-STOP_WORDS = {"jak", "jaki", "jaka", "jakie", "czy", "gdzie", "kiedy", "jest", "są", "dla", "przy", "oraz", "lub", "pod", "nad", "tym", "tego", "tej", "co", "to", "się", "nie", "tak", "który", "która", "które"}
+# 3. KAFELEK 1: Wgrywanie książki (zwija się automatycznie po wgraniu)
+with st.expander("📂 1. Wgraj książkę (PDF / EPUB)", expanded=(st.session_state.book_text == "")):
+    uploaded_file = st.file_uploader("Wybierz plik z telefonu", type=["pdf", "epub"])
+    if uploaded_file is not None and uploaded_file.name != st.session_state.book_name:
+        with st.spinner("Przetwarzam książkę..."):
+            if uploaded_file.name.endswith(".pdf"):
+                st.session_state.book_text = extract_pdf(uploaded_file)
+            elif uploaded_file.name.endswith(".epub"):
+                st.session_state.book_text = extract_epub(uploaded_file)
+            st.session_state.book_name = uploaded_file.name
+            st.rerun()
 
-def search_book(chunks, query, max_results=10):
-    words = [w.lower() for w in re.findall(r'\w+', query) if len(w) >= 3 and w.lower() not in STOP_WORDS]
-    if not words:
-        words = [w.lower() for w in re.findall(r'\w+', query) if len(w) >= 2]
-    
-    results = []
-    for label, text in chunks:
-        text_lower = text.lower()
-        # Szukamy rdzeni słów (pierwsze 4-5 liter), żeby uwzględnić polskie odmiany przez przypadki
-        roots = [w[:5] if len(w) >= 6 else w[:4] if len(w) >= 4 else w for w in words]
+    if st.session_state.book_name:
+        st.success(f"Aktywna książka: **{st.session_state.book_name}**")
+
+# 4. KAFELEK 2: Zapisywanie i wczytywanie pamięci na telefon
+with st.expander("💾 2. Pamięć rozmowy (Zapisz / Wczytaj)", expanded=False):
+    if st.session_state.messages:
+        # Przygotowanie pliku tekstowego do czytania na telefonie
+        txt_export = f"Rozmowa o książce: {st.session_state.book_name}\n\n"
+        for m in st.session_state.messages:
+            rola = "Ty" if m["role"] == "user" else "AI"
+            txt_export += f"{rola}:\n{m['content']}\n\n---\n\n"
         
-        score = 0
-        matched_roots = set()
-        for r in roots:
-            count = text_lower.count(r)
-            if count > 0:
-                score += count
-                matched_roots.add(r)
+        st.download_button(
+            label="📄 Pobierz notatki (TXT do czytania)",
+            data=txt_export,
+            file_name="notatki_z_ksiazki.txt",
+            mime="text/plain"
+        )
         
-        # Premia za strony, gdzie występuje kilka szukanych słów naraz
-        score += len(matched_roots) * 10
+        # Przygotowanie pliku pamięci do późniejszego wznowienia rozmowy
+        json_export = json.dumps(st.session_state.messages, ensure_ascii=False, indent=2)
+        st.download_button(
+            label="📥 Zapisz pamięć czatu (JSON)",
+            data=json_export,
+            file_name="pamiec_czatu.json",
+            mime="application/json"
+        )
         
-        if score > 0:
-            results.append((score, label, text, roots))
-            
-    results.sort(key=lambda x: x[0], reverse=True)
-    return results[:max_results]
+        if st.button("🗑️ Wyczyść obecną rozmowę"):
+            st.session_state.messages = []
+            st.rerun()
+    else:
+        st.info("Napisz pierwszą wiadomość na dole, aby móc zapisać rozmowę.")
 
-def highlight_text(text, roots):
-    highlighted = text
-    for r in set(roots):
-        if len(r) >= 3:
-            pattern = re.compile(f"({re.escape(r)}\\w*)", re.IGNORECASE)
-            highlighted = pattern.sub(r"<mark style='background-color: #ffe066; padding: 1px 4px; border-radius: 3px;'>\1</mark>", highlighted)
-    return highlighted
+    st.write("---")
+    uploaded_memory = st.file_uploader("Wczytaj zapisaną wcześniej pamięć (plik JSON)", type=["json"])
+    if uploaded_memory is not None:
+        if st.button("🔄 Przywróć tę rozmowę"):
+            st.session_state.messages = json.load(uploaded_memory)
+            st.success("Rozmowa przywrócona!")
+            st.rerun()
 
-uploaded_file = st.file_uploader("Wybierz książkę z telefonu (PDF lub EPUB)", type=["pdf", "epub"])
+# 5. Główny ekran czatu
+st.write("---")
 
-if uploaded_file:
-    if "book_chunks" not in st.session_state or st.session_state.get("file_name") != uploaded_file.name:
-        with st.spinner("Wczytuję książkę... To potrwa kilka sekund."):
-            if uploaded_file.name.lower().endswith(".pdf"):
-                st.session_state.book_chunks = extract_chunks_from_pdf(uploaded_file)
-            else:
-                st.session_state.book_chunks = extract_chunks_from_epub(uploaded_file)
-            st.session_state.file_name = uploaded_file.name
-        st.success(f"Gotowe! Wczytano {len(st.session_state.book_chunks)} stron/części z '{uploaded_file.name}'.")
+if not st.session_state.book_text:
+    st.info("👆 Najpierw wgraj książkę w pierwszym kafelku na górze, aby rozpocząć rozmowę.")
+else:
+    # Wyświetlanie historii wiadomości
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    query = st.text_input("Wpisz czego szukasz w książce (temat, objaw, punkt, pytanie):")
-    
-    if query:
-        results = search_book(st.session_state.book_chunks, query)
-        if not results:
-            st.warning("Nie znaleziono dokładnych odpowiedników w tekście. Spróbuj wpisać pojedyncze słowo kluczowe (np. 'migrena' zamiast długiego zdania).")
-        else:
-            st.markdown(f"### Znaleziono {len(results)} najbardziej trafnych miejsc w książce:")
-            for score, label, text, roots in results:
-                with st.expander(f"📖 {label}", expanded=True):
-                    clean_text = " ".join(text.split())
-                    st.markdown(highlight_text(clean_text, roots), unsafe_allow_html=True)
+    # Pole do pisania przypięte na dole ekranu telefonu
+    user_input = st.chat_input("O co chcesz zapytać? Np. 'Wyszukaj fragmenty o...'")
+
+    if user_input:
+        # Pokaż pytanie użytkowniczki
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        # Generowanie odpowiedzi przez AI na podstawie książki i historii rozmowy
+        with st.chat_message("assistant"):
+            with st.spinner("Szukam w książce..."):
+                # Budujemy pamięć ostatnich wiadomości dla AI
+                historia_tekst = "\n".join(
+                    [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-6:]]
+                )
+                
+                prompt = f"""Jesteś pomocnym i konkretnym asystentem analizującym książkę '{st.session_state.book_name}'.
+Odpowiadaj jasno, po ludzku i konkretnie, opierając się na poniższym tekście książki. 
+Jeśli proszono o wyszukanie informacji, wskaż dokładne wnioski i cytaty (lub numery stron, jeśli są widoczne).
+
+DOTYCHCZASOWA ROZMOWA:
+{historia_tekst}
+
+TEKST KSIĄŻKI:
+{st.session_state.book_text[:400000]}
+
+POLECENIE UŻYTKOWNICZKI:
+{user_input}"""
+
+                try:
+                    response = client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=prompt
+                    )
+                    reply = response.text
+                except Exception as e:
+                    reply = f"Wystąpił błąd połączenia z AI: {e}"
+
+                st.markdown(reply)
+                st.session_state.messages.append({"role": "assistant", "content": reply})
