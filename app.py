@@ -41,6 +41,26 @@ if "GEMINI_API_KEY" not in st.secrets:
 
 client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
+# Automatyczne wykrywanie działającego modelu dla Twojego klucza
+@st.cache_resource
+def znajdz_najlepszy_model():
+    try:
+         dostepne = []
+        for m in client.models.list():
+            nazwa = m.name.replace("models/", "")
+            if "gemini" in nazwa and "flash" in nazwa and "vision" not in nazwa:
+                dostepne.append(nazwa)
+        # Sortujemy tak, aby wybrać najnowszą wersję (np. 3.x przed 2.x)
+        if dostepne:
+            dostepne.sort(reverse=True)
+            return dostepne
+    except Exception:
+        pass
+    # Lista zapasowa, gdyby pobieranie listy się nie powiodło
+    return ["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
+lista_modeli = znajdz_najlepszy_model()
+
 # 2. Inicjalizacja pamięci w sesji
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -86,7 +106,6 @@ with st.expander("📂 1. Wgraj książkę (PDF / EPUB)", expanded=(st.session_s
 # 4. KAFELEK 2: Zapisywanie i wczytywanie pamięci na telefon
 with st.expander("💾 2. Pamięć rozmowy (Zapisz / Wczytaj)", expanded=False):
     if st.session_state.messages:
-        # Przygotowanie pliku tekstowego do czytania na telefonie
         txt_export = f"Rozmowa o książce: {st.session_state.book_name}\n\n"
         for m in st.session_state.messages:
             rola = "Ty" if m["role"] == "user" else "AI"
@@ -99,7 +118,6 @@ with st.expander("💾 2. Pamięć rozmowy (Zapisz / Wczytaj)", expanded=False):
             mime="text/plain"
         )
         
-        # Przygotowanie pliku pamięci do późniejszego wznowienia rozmowy
         json_export = json.dumps(st.session_state.messages, ensure_ascii=False, indent=2)
         st.download_button(
             label="📥 Zapisz pamięć czatu (JSON)",
@@ -128,24 +146,19 @@ st.write("---")
 if not st.session_state.book_text:
     st.info("👆 Najpierw wgraj książkę w pierwszym kafelku na górze, aby rozpocząć rozmowę.")
 else:
-    # Wyświetlanie historii wiadomości
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Pole do pisania przypięte na dole ekranu telefonu
     user_input = st.chat_input("O co chcesz zapytać? Np. 'Wyszukaj fragmenty o...'")
 
     if user_input:
-        # Pokaż pytanie użytkowniczki
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Generowanie odpowiedzi przez AI na podstawie książki i historii rozmowy
         with st.chat_message("assistant"):
             with st.spinner("Szukam w książce..."):
-                # Budujemy pamięć ostatnich wiadomości dla AI
                 historia_tekst = "\n".join(
                     [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-6:]]
                 )
@@ -163,14 +176,24 @@ TEKST KSIĄŻKI:
 POLECENIE UŻYTKOWNICZKI:
 {user_input}"""
 
-                try:
-                    response = client.models.generate_content(
-                        model="gemini-3.0-flash",
-                        contents=prompt
-                    )
-                    reply = response.text
-                except Exception as e:
-                    reply = f"Wystąpił błąd połączenia z AI: {e}"
+                reply = None
+                ostatni_blad = ""
+                
+                # Próbujemy kolejne dostępne modele aż do skutku
+                for model_name in lista_modeli:
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt
+                        )
+                        reply = response.text
+                        break
+                    except Exception as e:
+                        ostatni_blad = str(e)
+                        continue
+
+                if reply is None:
+                    reply = f"Nie udało się połączyć z żadnym modelem. Ostatni komunikat: {ostatni_blad}"
 
                 st.markdown(reply)
                 st.session_state.messages.append({"role": "assistant", "content": reply})
