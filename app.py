@@ -44,20 +44,15 @@ client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 # Automatyczne wykrywanie działającego modelu dla Twojego klucza
 @st.cache_resource
 def znajdz_najlepszy_model():
+    modele = ["gemini-3.8-flash", "gemini-3-flash-preview", "gemini-2.0-flash"]
     try:
-         dostepne = []
         for m in client.models.list():
             nazwa = m.name.replace("models/", "")
-            if "gemini" in nazwa and "flash" in nazwa and "vision" not in nazwa:
-                dostepne.append(nazwa)
-        # Sortujemy tak, aby wybrać najnowszą wersję (np. 3.x przed 2.x)
-        if dostepne:
-            dostepne.sort(reverse=True)
-            return dostepne
+            if "gemini" in nazwa and "flash" in nazwa and nazwa not in modele:
+                modele.append(nazwa)
     except Exception:
         pass
-    # Lista zapasowa, gdyby pobieranie listy się nie powiodło
-    return ["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    return modele
 
 lista_modeli = znajdz_najlepszy_model()
 
@@ -179,7 +174,6 @@ POLECENIE UŻYTKOWNICZKI:
                 reply = None
                 ostatni_blad = ""
                 
-                # Próbujemy kolejne dostępne modele aż do skutku
                 for model_name in lista_modeli:
                     try:
                         response = client.models.generate_content(
